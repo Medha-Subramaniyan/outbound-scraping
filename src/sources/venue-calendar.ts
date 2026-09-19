@@ -13,6 +13,7 @@
  * unparseable listing is better dropped than guessed at.
  */
 import { fetchPage, extractJsonLd, textOf, parseEventDate } from '../lib/fetch';
+import { renderPage } from '../lib/render';
 import logger from '../lib/logger';
 import { isExcludedCategory } from '../icp';
 import type { DiscoveredEvent, DiscoverOptions, Source } from '../types';
@@ -80,6 +81,7 @@ function fromJsonLd(blocks: unknown[], pageUrl: string): DiscoveredEvent[] {
       presentedBy: organizerName(e.organizer),
       source: 'venue-calendar',
       sourceUrl: url,
+      discoveredOn: pageUrl,
       // Prefer the event's own URL as the natural key. Falling back to
       // title+date keeps re-runs idempotent when a listing has no stable link.
       sourceUid: e.url ?? `${pageUrl}#${e.name}|${e.startDate ?? ''}`,
@@ -97,7 +99,7 @@ function fromJsonLd(blocks: unknown[], pageUrl: string): DiscoveredEvent[] {
  * human look, not to produce authoritative counts — anything it returns is
  * marked so the scorer can see the provenance.
  */
-function fromHtmlHeuristic(html: string, pageUrl: string): DiscoveredEvent[] {
+function fromHtmlHeuristic(html: string, pageUrl: string): boolean {
   const text = textOf(html);
 
   // Count date-shaped strings. Presence, not extraction.
@@ -105,15 +107,15 @@ function fromHtmlHeuristic(html: string, pageUrl: string): DiscoveredEvent[] {
     /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b/gi
   );
 
-  if (!dateish || dateish.length < 4) return [];
+  if (!dateish || dateish.length < 4) return false;
 
   logger.info(
     `  ${pageUrl}: no JSON-LD, but ${dateish.length} date-like strings — flagging for review`
   );
-  return [];
+  return true;
 }
 
-async function discoverOne(baseUrl: string): Promise<DiscoveredEvent[]> {
+async function discoverOne(baseUrl: string, renderEnabled: boolean): Promise<DiscoveredEvent[]> {
   let origin: string;
   try {
     origin = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`).origin;
@@ -133,7 +135,23 @@ async function discoverOne(baseUrl: string): Promise<DiscoveredEvent[]> {
       return events;
     }
 
-    fromHtmlHeuristic(html, url);
+    // The served HTML had no Event markup. When the page nonetheless looks
+    // like a calendar — lots of date-shaped text — it is worth one browser
+    // render: some platforms inject their JSON-LD along with the listings.
+    //
+    // Gated on the heuristic rather than tried everywhere, because a render
+    // costs ~20x a GET and most pages that lack Event markup lack it in the
+    // DOM too. `render` must be opted into by the caller.
+    if (renderEnabled && fromHtmlHeuristic(html, url)) {
+      const rendered = await renderPage(url);
+      if (rendered) {
+        const renderedEvents = fromJsonLd(extractJsonLd(rendered), url);
+        if (renderedEvents.length > 0) {
+          logger.info(`  ${url}: ${renderedEvents.length} events (rendered)`);
+          return renderedEvents;
+        }
+      }
+    }
   }
 
   logger.info(`  ${origin}: no machine-readable calendar found`);
@@ -156,7 +174,7 @@ export const venueCalendar: Source = {
 
     const all: DiscoveredEvent[] = [];
     for (const url of urls) {
-      all.push(...(await discoverOne(url)));
+      all.push(...(await discoverOne(url, opts.render ?? false)));
       if (opts.limit && all.length >= opts.limit) break;
     }
     return opts.limit ? all.slice(0, opts.limit) : all;

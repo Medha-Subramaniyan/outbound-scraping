@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS orgs (
   score_reasons      TEXT,   -- JSON array of human-readable reasons
   scored_at          TEXT,
 
+  -- When contact discovery last *attempted* this org, whether or not it found
+  -- anyone. Recording the attempt rather than the result is the point: most
+  -- venues yield nothing, and keying "already done" off the presence of a
+  -- people row made every barren org get re-crawled on every run — 93 of 139
+  -- orgs, each costing nine polite requests and several browser renders.
+  enriched_at      TEXT,
+
   first_seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );

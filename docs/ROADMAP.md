@@ -10,31 +10,66 @@ live Atlanta venues (130 real events, 15 orgs, in one command).
 - **`src/services/resolve.ts`** — entity resolution, including co-presenter splitting.
 - **`src/services/score.ts`** — the ICP gate, with asymmetric handling of forward calendars.
 - **`src/sources/`** — `axs-feed`, `venue-calendar`, `bandsintown`.
-- **CLI** — `migrate`, `discover`, `score`, `report`, `export`.
-- 32 tests, covering both live-data bugs found during the build.
+- **`src/services/contact.ts`** — contact discovery: names, titles and published emails from an org's own pages.
+- **`src/lib/render.ts`** — opt-in headless rendering (`--render`) for pages whose contacts mount client-side.
+- **`src/metros.ts` / `src/services/seeds.ts`** — 67 US metros and per-metro venue seed files.
+- **CLI** — `migrate`, `seed`, `discover`, `score`, `enrich`, `report`, `export`, `csv`.
+  `enrich` takes `--render`, `--published-only` and `--band any`; `csv` takes `--published-only`.
+- 56 tests, covering the live-data bugs found during both builds.
 
 ## Next, in order
 
-### 1. Contact discovery (`src/services/contact.ts`)
+### 1. Contact discovery — **built**, sources 1–2 of 4
 
-The gap between a qualified org and a person to write to. The `people` table and
-its persona routing exist; nothing fills them yet.
+`npm run enrich` crawls a qualified org's own `/about`, `/team`, `/contact` and
+records named people with their persona, plus published and role emails. It runs
+only on orgs past the ICP gate, per docs/ETHICS.md, and never guesses an address
+— `inferred` is a schema value this code does not write.
 
-Order of preference, best first:
+Still open from the original ordering:
 
-1. The venue's or promoter's own `/about`, `/team`, `/contact` — real names, often the GM or buyer directly.
-2. The published booking/submissions email. Real, but usually an unread firehose — mark it `role`, not `published`.
 3. State business filings for the registered agent of a promotion company.
 4. Paid enrichment, last, and only for orgs already qualified.
 
-**The booking email is a trap.** `booking@venue.com` is read by an intern or
-nobody. The value is in the named GM or the promoter's own address, so
-prioritise sources that yield a human name.
+**The booking email is still a trap.** `booking@venue.com` is read by an intern
+or nobody, so role addresses are recorded but marked `role` and ranked last.
+`--published-only` drops them from a run's output and from `prospects.csv`,
+while leaving the rows in the `people` table: a venue whose only listed contact
+is `booking@` is then still recoverable without paying for another crawl.
 
-### 2. Venue seed discovery
+**`--band any` is a bootstrap escape hatch.** It crawls every org with a
+domain, scored or not, for the case where a seed list has been probed as
+reachable but no show has been observed yet. It warns when used. The default
+stays gated on the ICP band, because docs/ETHICS.md's ordering — qualify first,
+then collect contact details — is what keeps the number of people in this
+database small.
 
-Right now `--urls` is hand-fed. It should be possible to say "Atlanta" and get a
-venue list. Options, roughly in order of ICP purity:
+**Rendering, and what it actually bought.** `npm run enrich -- --render`
+re-reads a page with a headless browser when the served HTML carried no contact
+detail. On the three venues tested it turned 0 named people into 2 — Empty
+Bottle's owner and managing partner, both with published addresses — and lifted
+the contact count from 4 to 15. Static is still tried first on every page; the
+browser only runs where the cheap read came back empty.
+
+**What rendering did not fix.** It does not help *discovery*. Venues like
+thecedar.org and tractortavern.com show 96–164 date-shaped strings on their
+calendars and publish no `Event` JSON-LD in the DOM either — rendering confirms
+the markup genuinely is not there. Counting those shows needs a DOM-based
+calendar extractor, which is a different job from rendering and carries a real
+risk of miscounting: a wrong date corrupts the show count the whole ICP gate
+rests on. That is the next real increment for coverage.
+
+### 2. Venue seed discovery — **partly built**
+
+`npm run seed` scaffolds a seed file per metro and `discover --metro nashville`
+/ `--all-metros` reads them, walking priority metros first. The ICP was never
+geo-bound — `PRIORITY_METROS` is a scoring bonus, not a filter — so going
+national was always a seeding problem, and this is the seeding half.
+
+The lists are still hand-curated, because seed quality decides everything
+downstream: a scraped directory brings in comedy clubs and wedding barns, and
+each one costs a full crawl before being discarded. Automating the list is the
+remaining work, roughly in order of ICP purity:
 
 - **NIVA member directory** and regional presenter associations — explicitly
   independent-venue lists, so very high purity at low volume. Best used to

@@ -44,6 +44,14 @@ export interface DiscoveredEvent {
   presentedBy: string | null;
   source: string;
   sourceUrl: string | null;
+  /**
+   * The page this event was crawled from, as opposed to where the listing
+   * points. A venue's JSON-LD usually sets `url` to the ticketing platform, so
+   * `sourceUrl` is a tixr.com or eventbrite link while the venue's own domain
+   * appears nowhere in the event. This field keeps it, and it is what contact
+   * discovery later crawls for a team page.
+   */
+  discoveredOn?: string | null;
   sourceUid: string;
   raw?: Record<string, unknown>;
 }
@@ -85,4 +93,9 @@ export interface DiscoverOptions {
   limit?: number;
   /** Explicit seed URLs, for the venue-calendar source. */
   urls?: string[];
+  /**
+   * Re-read a calendar page with a headless browser when the served HTML had
+   * no Event markup. Costly, so callers opt in. See src/lib/render.ts.
+   */
+  render?: boolean;
 }

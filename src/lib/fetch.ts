@@ -13,10 +13,51 @@
  */
 import https from 'https';
 import http from 'http';
+import dotenv from 'dotenv';
 import logger from './logger';
 
-const CONTACT = process.env.CRAWLER_CONTACT || 'unset — set CRAWLER_CONTACT in .env';
+// Loaded here, not only in db.ts. `UA` below is computed at import time, and
+// module load order is not guaranteed to reach db.ts first — when it did not,
+// CRAWLER_CONTACT was unset and every request went out with the fallback
+// string. See the ASCII note on that fallback.
+dotenv.config();
+
+/**
+ * The User-Agent, and why it is ASCII-only.
+ *
+ * Node rejects any header value outside Latin-1 with ERR_INVALID_CHAR, thrown
+ * from `setHeader` before the request is ever made. The previous fallback here
+ * contained an em-dash, so when CRAWLER_CONTACT was unset *every* fetch threw —
+ * including the robots.txt fetch inside `isAllowed`, whose catch turned the
+ * crash into `return false`. The crawler then logged "robots.txt disallows"
+ * for every URL on every site and discovered nothing, while looking like it was
+ * behaving politely. A contact address should never be able to break this, so
+ * the value is sanitised rather than trusted.
+ */
+const RAW_CONTACT = process.env.CRAWLER_CONTACT?.trim();
+
+// Strip anything a header cannot carry: non-ASCII, and the CR/LF that would
+// otherwise allow header injection from a mis-set .env value.
+const CONTACT = RAW_CONTACT
+  ? RAW_CONTACT.replace(/[^\x20-\x7E]/g, '').replace(/[()]/g, '')
+  : 'unset - set CRAWLER_CONTACT in .env';
+
+if (!RAW_CONTACT) {
+  logger.warn(
+    'CRAWLER_CONTACT is unset — requests will not carry a contact address. See docs/ETHICS.md.'
+  );
+}
+
 const UA = `outbound-scraping/0.1 (+prospect research; contact: ${CONTACT})`;
+
+/**
+ * Exported so the headless renderer identifies itself identically.
+ *
+ * Two different User-Agents from one crawl would make the traffic harder for a
+ * site owner to attribute, which defeats the reason for carrying a contact
+ * address at all.
+ */
+export const USER_AGENT = UA;
 
 /** Minimum gap between two requests to the same host. */
 const HOST_DELAY_MS = 1500;
@@ -33,6 +74,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 const lastHit = new Map<string, number>();
 
+/**
+ * Exported as `throttleHost` so the renderer shares this map rather than
+ * keeping its own. A separate map would let a static fetch and a render hit
+ * the same host simultaneously, quietly doubling the request rate the
+ * politeness budget is supposed to cap.
+ */
 async function throttle(url: string): Promise<void> {
   const host = new URL(url).host;
   const since = Date.now() - (lastHit.get(host) ?? 0);
@@ -43,7 +90,9 @@ async function throttle(url: string): Promise<void> {
 function get(url: string, timeoutMs: number, redirectsLeft: number): Promise<string | null> {
   return new Promise((resolve) => {
     const lib = url.startsWith('https:') ? https : http;
-    const req = lib.get(
+    let req: http.ClientRequest;
+    try {
+      req = lib.get(
       url,
       { headers: { 'User-Agent': UA, Accept: 'text/html,application/json' }, timeout: timeoutMs },
       (res) => {
@@ -76,7 +125,15 @@ function get(url: string, timeoutMs: number, redirectsLeft: number): Promise<str
         });
         res.on('end', () => resolve(body));
       }
-    );
+      );
+    } catch (err) {
+      // `lib.get` throws synchronously on a malformed request — most often a
+      // header it cannot encode. That escapes the Promise, so it is caught here
+      // and logged loudly: a crash that looks like "no data" is how a broken
+      // crawler runs for an hour and reports zero findings.
+      logger.error(`  request to ${url} could not be made: ${(err as Error).message}`);
+      return resolve(null);
+    }
 
     req.on('error', () => resolve(null));
     req.on('timeout', () => {
@@ -85,6 +142,8 @@ function get(url: string, timeoutMs: number, redirectsLeft: number): Promise<str
     });
   });
 }
+
+export { throttle as throttleHost };
 
 /** robots.txt, cached per origin for the life of the process. */
 const robotsCache = new Map<string, string[]>();
@@ -97,7 +156,17 @@ async function disallowedPaths(origin: string): Promise<string[]> {
   const body = await get(`${origin}/robots.txt`, 5000, 2);
 
   const rules: string[] = [];
-  if (body) {
+
+  // A site with no robots.txt often answers /robots.txt with its SPA shell:
+  // 200, text/html, no rules. Parsing that as robots is harmless today, but a
+  // page whose copy happens to contain "Disallow:" at the start of a line would
+  // silently forbid the whole crawl, so an HTML body is rejected outright.
+  const looksLikeHtml = body != null && /^\s*(<!doctype html|<html)/i.test(body);
+  if (looksLikeHtml) {
+    logger.info(`  ${origin}/robots.txt returned HTML, not robots rules — treating as absent`);
+  }
+
+  if (body && !looksLikeHtml) {
     // Only the wildcard group — this crawler has no named group anywhere.
     const section = body.split(/User-agent:/i).find((s) => s.trim().startsWith('*'));
     if (section) {
@@ -114,14 +183,25 @@ async function disallowedPaths(origin: string): Promise<string[]> {
   return rules;
 }
 
-/** A disallowed path is skipped, not fetched anyway. */
+/**
+ * A disallowed path is skipped, not fetched anyway.
+ *
+ * Only a genuine robots.txt rule returns false here. An unparseable URL is
+ * reported as such rather than folded into the same answer: "the site refused"
+ * and "this crawler is broken" are different facts, and reporting the second as
+ * the first is what hid the User-Agent bug above for a whole run.
+ */
 export async function isAllowed(url: string): Promise<boolean> {
+  let origin: string;
+  let pathname: string;
   try {
-    const { origin, pathname } = new URL(url);
-    return !(await disallowedPaths(origin)).some((p) => pathname.startsWith(p));
+    ({ origin, pathname } = new URL(url));
   } catch {
+    logger.warn(`  unparseable URL, skipping: ${url}`);
     return false;
   }
+
+  return !(await disallowedPaths(origin)).some((p) => pathname.startsWith(p));
 }
 
 /**
