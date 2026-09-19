@@ -1,0 +1,37 @@
+{
+  "name": "outbound-scraping",
+  "version": "0.1.0",
+  "description": "Discovers and qualifies independent promoters, venue talent buyers, and boutique artist managers by what they actually do — not by what their job title says.",
+  "main": "dist/index.js",
+  "scripts": {
+    "migrate": "ts-node src/scripts/migrate.ts",
+    "discover": "ts-node src/scripts/discover.ts",
+    "score": "ts-node src/scripts/score.ts",
+    "export": "ts-node src/scripts/export.ts",
+    "report": "ts-node src/scripts/report.ts",
+    "build": "tsc",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write src",
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.14.2",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.3.2",
+    "ts-jest": "^29.1.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.2"
+  }
+}

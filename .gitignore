@@ -1,0 +1,13 @@
+node_modules/
+dist/
+logs/
+.env
+
+# The scraped database and any exports. These contain personal contact data:
+# they stay on the machine that scraped them and never enter git history.
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+exports/
+*.csv
