@@ -419,3 +419,213 @@ describe('IVW directory parsing', () => {
     jest.dontMock('../src/lib/fetch');
   });
 });
+
+describe('shared mailboxes that read like a person or a title', () => {
+  const { classifyEmail: cls } = require('../src/services/contact');
+
+  it('treats a job-title or department mailbox as role, not a named human', () => {
+    // Found by probing the classifier: all of these came back 'published',
+    // which puts a shared inbox into the --published-only working list.
+    for (const e of [
+      'gm@venue.com', 'owner@venue.com', 'promo@venue.com', 'hospitality@venue.com',
+      'bar@venue.com', 'operations@venue.com', 'staff@venue.com', 'team@venue.com',
+      'sponsorship@venue.com', 'guestlist@venue.com', 'pr@venue.com',
+    ]) {
+      expect(`${e}=${cls(e)}`).toBe(`${e}=role`);
+    }
+  });
+
+  it('keeps short given names that happen to look like a function word', () => {
+    // Exact-match only, and none of these are on the list: Art, Dev, Will and
+    // Pat are people.
+    for (const e of ['art@venue.com', 'dev@venue.com', 'will@venue.com', 'pat@venue.com']) {
+      expect(`${e}=${cls(e)}`).toBe(`${e}=published`);
+    }
+  });
+});
+
+describe('names published as the text of an email link', () => {
+  // The commonest staff-list shape on small venue sites has no title at all:
+  // the person's name IS the mailto link. extractPeople needs a title, so all
+  // of these were stored as a bare address with no name.
+  const { extractMailtoPeople } = require('../src/services/contact');
+
+  it('reads the name off the link when it matches the address', () => {
+    const html = `<ul>
+      <li><a href="mailto:cameron@emptybottle.com">Cameron Diaz</a></li>
+      <li><a class="x" href="mailto:jtaylor@thecedar.org?subject=Hi">Jamie Taylor</a></li>
+      <li><a href='mailto:Sarah.Chen@venue.com'><span>Sarah Chen</span></a></li>
+    </ul>`;
+    expect(extractMailtoPeople(html)).toEqual([
+      { fullName: 'Cameron Diaz', email: 'cameron@emptybottle.com' },
+      { fullName: 'Jamie Taylor', email: 'jtaylor@thecedar.org' },
+      { fullName: 'Sarah Chen', email: 'sarah.chen@venue.com' },
+    ]);
+  });
+
+  it('accepts initials as the address when the link names the person', () => {
+    const html = `<a href="mailto:sc@venue.com">Sarah Chen</a>`;
+    expect(extractMailtoPeople(html)).toEqual([{ fullName: 'Sarah Chen', email: 'sc@venue.com' }]);
+  });
+
+  it('invents nobody from call-to-action link text', () => {
+    // "Contact Us" is name-shaped. Nothing in it matches the address, so it is
+    // never bound — the same rule that stops a fabricated contact elsewhere.
+    const html = `<a href="mailto:cameron@v.com">Contact Us</a>
+                  <a href="mailto:cameron@v.com">Email Cameron</a>
+                  <a href="mailto:dana@v.com">Get In Touch</a>
+                  <a href="mailto:dana@v.com">dana@v.com</a>`;
+    expect(extractMailtoPeople(html)).toEqual([]);
+  });
+
+  it('never names a role mailbox, whatever the link says', () => {
+    const html = `<a href="mailto:booking@venue.com">Booking Smith</a>
+                  <a href="mailto:info@venue.com">Sarah Chen</a>`;
+    expect(extractMailtoPeople(html)).toEqual([]);
+  });
+
+  it('does not bind a name to an unrelated address', () => {
+    // A link whose text is one person and whose address is another is a site
+    // error; binding it would attach a real name to the wrong inbox.
+    expect(extractMailtoPeople(`<a href="mailto:marcus@venue.com">Sarah Chen</a>`)).toEqual([]);
+  });
+});
+
+describe('naming a bare personal address from the same page', () => {
+  // 398 of 419 scraped contacts were an address with no name. Most sit on a
+  // page that also prints the person's name — just not next to a title the
+  // ICP personas recognise, so extractPeople never offered them for binding.
+  const { nameForEmail } = require('../src/services/contact');
+
+  it('names an address from a staff card whose title is outside the personas', () => {
+    const html = `<div class="card"><h3>Dana Lopez</h3><p>Production Manager</p>
+                  <a href="mailto:dana@venue.com">Email</a></div>`;
+    expect(nameForEmail(html, 'dana@venue.com')).toBe('Dana Lopez');
+  });
+
+  it('recognises initial-plus-surname and first.last addresses', () => {
+    const html = `<h4>Jamie Taylor</h4><h4>Sarah Chen</h4>`;
+    expect(nameForEmail(html, 'jtaylor@thecedar.org')).toBe('Jamie Taylor');
+    expect(nameForEmail(html, 'sarah.chen@thecedar.org')).toBe('Sarah Chen');
+  });
+
+  it('reads a name that shares its line with a title', () => {
+    expect(nameForEmail(`<li>Alex Moreno, Lighting Designer</li>`, 'alex@venue.com')).toBe('Alex Moreno');
+  });
+
+  it('leaves the address unnamed when two people could own it', () => {
+    const html = `<h3>Dana Lopez</h3><h3>Dana Whitfield</h3>`;
+    expect(nameForEmail(html, 'dana@venue.com')).toBeNull();
+  });
+
+  it('does not match on a substring of a name', () => {
+    // A substring test would hand art@ to Martin.
+    expect(nameForEmail(`<h3>Martin Shaw</h3>`, 'art@venue.com')).toBeNull();
+  });
+
+  it('does not accept bare initials without a link tying them together', () => {
+    expect(nameForEmail(`<h3>Sarah Chen</h3>`, 'sc@venue.com')).toBeNull();
+  });
+
+  it('invents nobody from furniture or for a role mailbox', () => {
+    expect(nameForEmail(`<p>Contact Dana</p><p>Meet Dana</p>`, 'dana@venue.com')).toBeNull();
+    expect(nameForEmail(`<h3>Booking Smith</h3>`, 'booking@venue.com')).toBeNull();
+  });
+});
+
+describe('assembling one page into contacts', () => {
+  const { contactsFromPage } = require('../src/services/contact');
+  const URL_ = 'https://venue.com/team';
+
+  it('names an address whose name is the link text, and lists it once', () => {
+    const html = `<li><a href="mailto:cameron@venue.com">Cameron Diaz</a></li>`;
+    expect(contactsFromPage(html, URL_)).toEqual([
+      { fullName: 'Cameron Diaz', title: null, email: 'cameron@venue.com',
+        emailSource: 'published', profileUrl: null, sourceUrl: URL_ },
+    ]);
+  });
+
+  it('names an address from a staff card with a non-persona title', () => {
+    const html = `<h3>Dana Lopez</h3><p>Production Manager</p><a href="mailto:dana@venue.com">Email</a>`;
+    const found = contactsFromPage(html, URL_);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ fullName: 'Dana Lopez', title: null, email: 'dana@venue.com' });
+  });
+
+  it('keeps the titled person from extractPeople rather than a second untitled copy', () => {
+    const html = `<h3>Sarah Chen</h3><p>Talent Buyer</p><a href="mailto:sarah@venue.com">Sarah Chen</a>`;
+    expect(contactsFromPage(html, URL_)).toEqual([
+      { fullName: 'Sarah Chen', title: 'Talent Buyer', email: 'sarah@venue.com',
+        emailSource: 'published', profileUrl: null, sourceUrl: URL_ },
+    ]);
+  });
+
+  it('still records a role mailbox, unnamed', () => {
+    const found = contactsFromPage(`<p>Write to booking@venue.com</p>`, URL_);
+    expect(found).toEqual([
+      { fullName: null, title: null, email: 'booking@venue.com',
+        emailSource: 'role', profileUrl: null, sourceUrl: URL_ },
+    ]);
+  });
+});
+
+describe('a name found later replaces the unnamed row for the same address', () => {
+  // Databases scraped before names could be bound hold `cameron@` with no
+  // name. Re-crawling must not leave that row beside the new named one, or the
+  // working list carries the same inbox twice.
+  const tmp = path.join(os.tmpdir(), `people-named-${Date.now()}.db`);
+  afterAll(() => { try { fs.unlinkSync(tmp); } catch { /* already gone */ } });
+
+  it('ends with one row, named, keeping any outreach history', () => {
+    process.env.DATABASE_PATH = tmp;
+    jest.resetModules();
+
+    const { db, close } = require('../src/lib/db');
+    db().exec(fs.readFileSync(path.join(__dirname, '../db/schema.sql'), 'utf8'));
+    db().prepare(`INSERT INTO orgs (id, name, slug) VALUES ('o1', 'Venue', 'venue')`).run();
+
+    const { saveContact } = require('../src/services/contact');
+    const bare = { fullName: null, title: null, email: 'cameron@venue.com',
+      emailSource: 'published' as const, profileUrl: null, sourceUrl: 'u' };
+
+    saveContact('o1', bare, 'site-crawl');
+    const oldId = (db().prepare(`SELECT id FROM people`).get() as { id: string }).id;
+    db().prepare(`INSERT INTO outreach (id, person_id, status) VALUES ('x1', ?, 'sent')`).run(oldId);
+
+    saveContact('o1', { ...bare, fullName: 'Cameron Diaz' }, 'site-crawl');
+
+    const rows = db().prepare(`SELECT id, full_name FROM people`).all() as { id: string; full_name: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].full_name).toBe('Cameron Diaz');
+
+    const outreach = db().prepare(`SELECT person_id, status FROM outreach`).all() as
+      { person_id: string; status: string }[];
+    expect(outreach).toEqual([{ person_id: rows[0].id, status: 'sent' }]);
+    close();
+  });
+  it('keeps the bare row when the named person holds a different address', () => {
+    // The upsert never swaps a published address for another, so the named row
+    // keeps cdiaz@. Deleting the bare cameron@ row then would lose the only
+    // record of an address the venue published.
+    process.env.DATABASE_PATH = tmp.replace('.db', '-b.db');
+    jest.resetModules();
+
+    const { db, close } = require('../src/lib/db');
+    db().exec(fs.readFileSync(path.join(__dirname, '../db/schema.sql'), 'utf8'));
+    db().prepare(`INSERT INTO orgs (id, name, slug) VALUES ('o1', 'Venue', 'venue')`).run();
+
+    const { saveContact } = require('../src/services/contact');
+    const base = { title: null, emailSource: 'published' as const, profileUrl: null, sourceUrl: 'u' };
+
+    saveContact('o1', { ...base, fullName: 'Cameron Diaz', email: 'cdiaz@venue.com' }, 'site-crawl');
+    saveContact('o1', { ...base, fullName: null, email: 'cameron@venue.com' }, 'site-crawl');
+    saveContact('o1', { ...base, fullName: 'Cameron Diaz', email: 'cameron@venue.com' }, 'site-crawl');
+
+    const emails = (db().prepare(`SELECT email FROM people ORDER BY email`).all() as { email: string }[])
+      .map((r) => r.email);
+    expect(emails).toEqual(['cameron@venue.com', 'cdiaz@venue.com']);
+
+    close();
+    try { fs.unlinkSync(tmp.replace('.db', '-b.db')); } catch { /* ignore */ }
+  });
+});
