@@ -65,6 +65,16 @@ const ROLE_LOCALPARTS = new Set([
   'lostandfound', 'lost', 'rentals', 'venuerental', 'catering', 'merch',
   'production', 'tech', 'webmaster', 'billing', 'accounting', 'accounts',
   'noreply', 'no-reply', 'donotreply', 'newsletter', 'subscribe', 'feedback',
+  // Job-title and department mailboxes. `gm@` and `owner@` read like a person
+  // and were classified 'published', which put shared inboxes into the
+  // --published-only working list. Exact-match only, and nothing here is also
+  // a given name: 'art', 'dev', 'will' and 'pat' are deliberately absent.
+  'gm', 'generalmanager', 'owner', 'owners', 'promo', 'promos', 'promotions',
+  'hospitality', 'bar', 'ops', 'operations', 'staff', 'team', 'crew',
+  'sponsorship', 'sponsorships', 'sponsors', 'advertising', 'ads', 'pr',
+  'publicity', 'guestlist', 'vip', 'reservations', 'groupsales', 'ticketing',
+  'programming', 'membership', 'members', 'development', 'donate', 'education',
+  'finance', 'payroll', 'legal', 'privacy', 'customerservice', 'service',
 ]);
 
 /**
@@ -163,6 +173,152 @@ export function classifyEmail(email: string): EmailSource {
 }
 
 /**
+ * What a human name looks like, shared by every extractor in this file.
+ *
+ * Two words plus an optional middle initial. The cap is deliberate — see the
+ * note inside `extractPeople` about "Email Marcus Webb".
+ */
+const NAME_SHAPE = "[A-Z][a-z]{1,15}(?:\\s+[A-Z]\\.)?\\s+[A-Z][A-Za-z'’-]{1,20}";
+
+/**
+ * Words that make a name-shaped string page furniture, not a person.
+ *
+ * The second row is link text: "Email Cameron" and "Contact Us" are both
+ * name-shaped, and both sit inside exactly the mailto links that
+ * `extractMailtoPeople` reads.
+ */
+const NAME_FURNITURE =
+  /\b(Privacy|Cookie|Terms|Buy|Get|Sign|Read|View|Learn|All Rights|Box Office|Email|E-mail|Mail|Contact|Message|Send|Click|Meet|Ask|Write)\b/i;
+
+/**
+ * Does this address plausibly belong to this person?
+ *
+ * Strict equality against the shapes people actually use — `cameron@`,
+ * `sarah.chen@`, `jtaylor@`, `sarahc@` — rather than a substring test, which
+ * would bind `art@` to Martin. Initials (`sc@`) are only accepted when the
+ * caller has independent evidence the two belong together, because two letters
+ * match far too many names to stand alone.
+ */
+export function nameMatchesLocal(
+  fullName: string,
+  email: string,
+  opts: { allowInitials?: boolean } = {}
+): boolean {
+  const words = fullName
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ''))
+    .filter((w) => w.length > 1); // drops a middle initial
+  if (words.length < 2) return false;
+
+  const first = words[0];
+  const last = words[words.length - 1];
+  const local = email
+    .toLowerCase()
+    .split('@')[0]
+    .replace(/[^a-z]/g, '');
+
+  const shapes = [first, last, first + last, last + first, first[0] + last, first + last[0]];
+  if (opts.allowInitials) shapes.push(first[0] + last[0]);
+  return shapes.includes(local);
+}
+
+/**
+ * Names published as the text of their own email link.
+ *
+ *     <a href="mailto:cameron@emptybottle.com">Cameron Diaz</a>
+ *
+ * This is the commonest staff-list shape on a small venue site, and it carries
+ * no title, so `extractPeople` — which needs a persona-matching title to trust
+ * a name — never sees it. Here the site itself has tied the name to the
+ * address, which is stronger evidence than any title.
+ *
+ * Still conservative, for the same reason as everything else in this file: the
+ * link text must be name-shaped, must not be furniture ("Contact Us"), must
+ * match the address, and the address must not be a role mailbox. A link reading
+ * "Sarah Chen" over `info@` names the inbox's current reader, not its owner.
+ */
+export function extractMailtoPeople(html: string): { fullName: string; email: string }[] {
+  const out: { fullName: string; email: string }[] = [];
+  const seen = new Set<string>();
+  const nameOnly = new RegExp(`^${NAME_SHAPE}$`);
+
+  const re = /<a\b[^>]*\bhref\s*=\s*["']mailto:([^"'?\s]+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  for (const m of stripChrome(html).matchAll(re)) {
+    const email = m[1].trim().toLowerCase();
+    if (!isUsableEmail(email) || classifyEmail(email) === 'role') continue;
+
+    const fullName = m[2]
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!nameOnly.test(fullName) || NAME_FURNITURE.test(fullName)) continue;
+    if (!nameMatchesLocal(fullName, email, { allowInitials: true })) continue;
+    if (seen.has(email)) continue;
+    seen.add(email);
+
+    out.push({ fullName, email });
+  }
+
+  return out;
+}
+
+/**
+ * Flatten markup to text with every element boundary kept as a newline.
+ *
+ * The boundary is the only thing that says where a name ends, so it is turned
+ * into an explicit separator before any pattern runs. Entities are decoded
+ * first so `O&#39;Brien` survives as one token.
+ */
+function elementLines(html: string): string {
+  return stripChrome(html)
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/<[^>]+>/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n');
+}
+
+/**
+ * Find the name of whoever a bare personal address belongs to, on one page.
+ *
+ * `extractPeople` only trusts a name that sits beside a persona-matching
+ * title, which is right for deciding who to *route* to — but it means a
+ * production manager or a co-owner listed without a title is never offered for
+ * binding, and their published address is stored with no name on it. That was
+ * 398 of the first 419 contacts.
+ *
+ * Here the address is the evidence instead of the title: `dana@` plus a
+ * "Dana Lopez" on the same page. No title is needed and none is returned.
+ *
+ * Returns null — not a best guess — when nobody matches, when two people do, or
+ * when the address is a role mailbox. An unnamed address costs one manual
+ * lookup; a wrong name on a real inbox is an email that opens by calling
+ * someone by a colleague's name.
+ */
+export function nameForEmail(html: string, email: string): string | null {
+  if (!isUsableEmail(email) || classifyEmail(email) === 'role') return null;
+
+  const re = new RegExp(`^[ \\t]*(${NAME_SHAPE})[ \\t]*(?=$|[–—\\-|,:])`, 'gm');
+  const matches = new Set<string>();
+
+  for (const m of elementLines(html).matchAll(re)) {
+    const fullName = m[1].replace(/\s+/g, ' ').trim();
+    if (NAME_FURNITURE.test(fullName)) continue;
+    if (nameMatchesLocal(fullName, email)) matches.add(fullName);
+  }
+
+  return matches.size === 1 ? [...matches][0] : null;
+}
+
+/**
  * Pull "Name — Title" pairs out of a team page.
  *
  * Works on the *markup*, not on stripped text. This is the whole trick: a team
@@ -186,14 +342,7 @@ export function extractPeople(html: string): { fullName: string; title: string }
   // Collapse every tag to a newline, so an element boundary becomes a
   // separator the pattern below can anchor on. Entities are decoded first so a
   // name written `O&#39;Brien` survives as one token.
-  const text = stripChrome(html)
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/<[^>]+>/g, '\n')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n+/g, '\n');
+  const text = elementLines(html);
 
   // A capitalised human name, then a separator (an element boundary, a dash, a
   // comma), then up to ~50 characters of title text.
@@ -203,8 +352,10 @@ export function extractPeople(html: string): { fullName: string; title: string }
   // heading produced the contact "Email Marcus Webb".
   // The surname allows an internal capital after an apostrophe or hyphen, so
   // O'Brien and Smith-Jones parse as one name rather than being skipped.
-  const re =
-    /^[ \t]*([A-Z][a-z]{1,15}(?:\s+[A-Z]\.)?\s+[A-Z][A-Za-z'’-]{1,20})[ \t]*[\n–—\-|,:]+[ \t]*([A-Za-z][A-Za-z &/'-]{2,50})/gm;
+  const re = new RegExp(
+    `^[ \\t]*(${NAME_SHAPE})[ \\t]*[\\n–—\\-|,:]+[ \\t]*([A-Za-z][A-Za-z &/'-]{2,50})`,
+    'gm'
+  );
 
   for (const m of text.matchAll(re)) {
     const fullName = m[1].replace(/\s+/g, ' ').trim();
@@ -216,9 +367,7 @@ export function extractPeople(html: string): { fullName: string; title: string }
     if (!matchPersona(title)) continue;
 
     // Reject names built from page furniture.
-    if (/\b(Privacy|Cookie|Terms|Buy|Get|Sign|Read|View|Learn|All Rights|Box Office)\b/i.test(fullName)) {
-      continue;
-    }
+    if (NAME_FURNITURE.test(fullName)) continue;
 
     const key = fullName.toLowerCase();
     if (seen.has(key)) continue;
@@ -259,6 +408,89 @@ function bindEmails(
   }
 
   return bound;
+}
+
+/**
+ * Everything one page says about who to write to.
+ *
+ * Pure — no network, no database — so the rules for combining the three
+ * extractors are testable on a string. In order of how much each is trusted:
+ *
+ *   1. `extractPeople`       a name beside a persona title. Carries the title.
+ *   2. `extractMailtoPeople` a name that is the text of its own email link.
+ *   3. `nameForEmail`        a bare address whose owner is named on the page.
+ *
+ * A later step never overrides an earlier one: it fills an email a titled
+ * person was missing, or names an address nobody had claimed. An address that
+ * no step can name is still recorded, unnamed, so the export can rank it last.
+ */
+export function contactsFromPage(html: string, sourceUrl: string): FoundContact[] {
+  const found: FoundContact[] = [];
+  const claimed = new Set<string>();
+
+  const emails: string[] = [];
+  for (const e of (stripChrome(html).match(EMAIL_RE) ?? []).filter(isUsableEmail)) {
+    if (!emails.some((x) => x.toLowerCase() === e.toLowerCase())) emails.push(e);
+  }
+
+  const people = extractPeople(html);
+  const bound = bindEmails(people, emails);
+
+  for (const person of people) {
+    const email = bound.get(person.fullName) ?? null;
+    if (email) claimed.add(email.toLowerCase());
+    found.push({
+      fullName: person.fullName,
+      title: person.title,
+      email,
+      emailSource: email ? classifyEmail(email) : null,
+      profileUrl: null,
+      sourceUrl,
+    });
+  }
+
+  /** Attach a named address: to the titled person if listed, else as a new row. */
+  const attach = (fullName: string, email: string): boolean => {
+    const existing = found.find((f) => f.fullName?.toLowerCase() === fullName.toLowerCase());
+    if (existing?.email) return false; // they already have an address; do not swap it
+    claimed.add(email.toLowerCase());
+    if (existing) {
+      existing.email = email;
+      existing.emailSource = classifyEmail(email);
+    } else {
+      found.push({
+        fullName,
+        title: null,
+        email,
+        emailSource: classifyEmail(email),
+        profileUrl: null,
+        sourceUrl,
+      });
+    }
+    return true;
+  };
+
+  for (const { fullName, email } of extractMailtoPeople(html)) {
+    if (!claimed.has(email)) attach(fullName, email);
+  }
+
+  for (const email of emails) {
+    if (claimed.has(email.toLowerCase())) continue;
+    const owner = nameForEmail(html, email);
+    if (owner && attach(owner, email)) continue;
+
+    claimed.add(email.toLowerCase());
+    found.push({
+      fullName: null,
+      title: null,
+      email,
+      emailSource: classifyEmail(email),
+      profileUrl: null,
+      sourceUrl,
+    });
+  }
+
+  return found;
 }
 
 /**
@@ -352,41 +584,27 @@ export async function findContacts(
 
     if (!html) continue;
 
-    const clean = stripChrome(html);
+    for (const c of contactsFromPage(html, url)) {
+      const key = c.email?.toLowerCase();
 
-    const emails = [...new Set((clean.match(EMAIL_RE) ?? []).filter(isUsableEmail))];
-    const people = extractPeople(html);
-    const bound = bindEmails(people, emails);
-
-    for (const person of people) {
-      const email = bound.get(person.fullName) ?? null;
-      found.push({
-        fullName: person.fullName,
-        title: person.title,
-        email,
-        emailSource: email ? classifyEmail(email) : null,
-        profileUrl: null,
-        sourceUrl: url,
-      });
-      if (email) {
-        namedWithEmail++;
-        seenEmails.add(email.toLowerCase());
+      if (!c.fullName) {
+        // Unattached addresses are still worth keeping — a booking@ is a way
+        // in, just a worse one — but only once per site.
+        if (!key || seenEmails.has(key)) continue;
+        seenEmails.add(key);
+        found.push(c);
+        continue;
       }
-    }
 
-    // Unattached addresses are still worth keeping — a booking@ is a way in,
-    // just a worse one. Recorded with no name so the export can rank it last.
-    for (const email of emails) {
-      if (seenEmails.has(email.toLowerCase())) continue;
-      seenEmails.add(email.toLowerCase());
-      found.push({
-        fullName: null,
-        title: null,
-        email,
-        emailSource: classifyEmail(email),
-        profileUrl: null,
-        sourceUrl: url,
-      });
+      if (key) {
+        // /contact often shows the bare address before /team names its owner.
+        // Drop the earlier unnamed sighting so the inbox is listed once.
+        const earlier = found.findIndex((f) => !f.fullName && f.email?.toLowerCase() === key);
+        if (earlier >= 0) found.splice(earlier, 1);
+        seenEmails.add(key);
+        namedWithEmail++;
+      }
+      found.push(c);
     }
   }
 
@@ -427,9 +645,12 @@ export function saveContact(orgId: string, c: FoundContact, source: string): voi
 
   const id = crypto.createHash('sha1').update(identity).digest('hex').slice(0, 16);
 
-  db()
-    .prepare(
-      `INSERT INTO people
+  const conn = db();
+
+  const write = conn.transaction(() => {
+    conn
+      .prepare(
+        `INSERT INTO people
          (id, org_id, full_name, title, persona_key, persona_tier,
           email, email_source, profile_url, source, source_url)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -446,10 +667,43 @@ export function saveContact(orgId: string, c: FoundContact, source: string): voi
            ELSE people.email_source END,
          profile_url = COALESCE(people.profile_url, excluded.profile_url),
          source_url  = COALESCE(people.source_url, excluded.source_url)`
-    )
-    .run(
-      id, orgId, c.fullName, c.title,
-      persona?.key ?? null, persona?.tier ?? null,
-      c.email, c.emailSource, c.profileUrl, source, c.sourceUrl
-    );
+      )
+      .run(
+        id, orgId, c.fullName, c.title,
+        persona?.key ?? null, persona?.tier ?? null,
+        c.email, c.emailSource, c.profileUrl, source, c.sourceUrl
+      );
+
+    // A name found for an address that was previously stored bare. The bare
+    // row is keyed on the address and the named row on the person, so without
+    // this they sit side by side and the working list carries one inbox twice.
+    // Outreach history moves to the named row first: deleting the bare row
+    // would otherwise cascade it away.
+    if (!c.fullName || !c.email) return;
+
+    // Only once the named row really holds this address. The upsert above never
+    // swaps one published address for another, so a person already stored under
+    // cdiaz@ keeps it — and the bare cameron@ row is then the only record of an
+    // address the venue published.
+    const stored = conn.prepare(`SELECT email FROM people WHERE id = ?`).get(id) as
+      | { email: string | null }
+      | undefined;
+    if (stored?.email?.toLowerCase() !== c.email.toLowerCase()) return;
+
+    const bare = conn
+      .prepare(
+        `SELECT id FROM people
+         WHERE org_id = ? AND full_name IS NULL AND lower(email) = lower(?) AND id != ?`
+      )
+      .all(orgId, c.email, id) as { id: string }[];
+
+    for (const row of bare) {
+      conn
+        .prepare(`UPDATE OR IGNORE outreach SET person_id = ? WHERE person_id = ?`)
+        .run(id, row.id);
+      conn.prepare(`DELETE FROM people WHERE id = ?`).run(row.id);
+    }
+  });
+
+  write();
 }

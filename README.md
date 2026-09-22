@@ -112,7 +112,7 @@ arguments.
 | `npm run report` | What the pipeline currently believes, in the terminal. |
 | `npm run csv -- --published-only` | Mirror the whole DB to `data/csv/*.csv`. |
 | `npm run export` | The outreach artefact: one band, split per persona. |
-| `npm test` / `npm run typecheck` / `npm run lint` | 72 tests. Run before pushing. |
+| `npm test` / `npm run typecheck` / `npm run lint` | 92 tests. Run before pushing. |
 
 ### Flags worth knowing
 
@@ -220,6 +220,25 @@ team-page markup. It's deliberately conservative — it would rather miss someon
 than invent "Privacy Policy, Director" — but it's leaving a lot on the table.
 Better structural parsing (staff cards, `mailto:` links adjacent to headings)
 would raise that ratio a lot.
+
+**Partly done.** Two binders now run after `extractPeople`, combined in
+`contactsFromPage()`:
+
+- `extractMailtoPeople()` — the name is the text of its own email link
+  (`<a href="mailto:cameron@…">Cameron Diaz</a>`). No title needed.
+- `nameForEmail()` — a bare `dana@` is named from a "Dana Lopez" elsewhere on
+  the same page, even when her title is outside the personas.
+
+Both match the name against the address by strict equality (`cameron`,
+`sarah.chen`, `jtaylor`), never by substring, and return nothing when two
+people could own the address. Neither has been measured on the live database
+yet: re-run `npm run enrich -- --band any --render --recheck` and compare the
+named count before trusting it. Rows that gain a name replace their old unnamed
+row, so the working list does not carry one inbox twice.
+
+Still open: a title printed *before* the name, and three-word names. Both were
+left alone on purpose — pairing a title with the next name-shaped line turns
+"General Manager / Upcoming Shows" into a person.
 
 ### 3. More seed directories
 
@@ -331,7 +350,7 @@ src/services/contact.ts       email extraction + provenance classification
 src/services/seeds.ts         seed file reading
 src/sources/                  one file per discovery source
 src/scripts/                  the CLI
-tests/                        72 tests; most encode a bug found in live data
+tests/                        92 tests; most encode a bug found in live data
 docs/ETHICS.md                read before adding a source
 docs/ROADMAP.md               what's built, what's next
 ```
